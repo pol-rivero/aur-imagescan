@@ -1,0 +1,128 @@
+name: Check Arch boost-libs Release
+
+on:
+  schedule:
+    - cron: "0 */12 * * *"   # every 12 hours
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # needed to push current_version.txt updates
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Ensure jq is available
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Determine latest boost-libs version (JSON API)
+        id: latest
+        shell: bash
+        env:
+          PKG_REPO: extra
+          PKG_ARCH: x86_64
+          PKG_NAME: boost-libs
+          INCLUDE_PKGREL: false
+        run: |
+          set -euo pipefail
+
+          API_URL="https://archlinux.org/packages/${PKG_REPO}/${PKG_ARCH}/${PKG_NAME}/json/"
+
+          # Build "epoch:pkgver-pkgrel" (omit epoch if 0 or null)
+          jq_version_filter_with_pkgrel='
+            def ver:
+              (if (.epoch != null and .epoch != 0) then (.epoch|tostring)+":" else "" end)
+              + (.pkgver // "")
+              + "-"
+              + ((.pkgrel // "")|tostring);
+            ver
+          '
+          jq_version_filter_without_pkgrel='
+            def ver:
+              (.pkgver // "");
+            ver
+          '
+
+          if [ "${INCLUDE_PKGREL}" = "true" ]; then
+            jq_version_filter="$jq_version_filter_with_pkgrel"
+          else
+            jq_version_filter="$jq_version_filter_without_pkgrel"
+          fi
+          LATEST=$(curl -fsSL "$API_URL" | jq -r "$jq_version_filter")
+          if [ -z "${LATEST:-}" ] || [ "${LATEST}" = "null-" ]; then
+            echo "Could not determine latest version from API: $API_URL" >&2
+            exit 1
+          fi
+
+          echo "latest=${LATEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Compare with current_version.txt
+        id: compare
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f current_version.txt ]; then
+            CURRENT=$(tr -d ' \t\n\r' < current_version.txt)
+          else
+            CURRENT=""
+          fi
+
+          echo "Current version: '${CURRENT}'"
+          echo "New version: '${{ steps.latest.outputs.latest }}'"
+
+          if [ "${{ steps.latest.outputs.latest }}" != "${CURRENT}" ]; then
+            echo "Version has changed."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version has not changed."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update imagescan pkgrel
+        if: steps.compare.outputs.changed == 'true'
+        run: |
+          # Read and increment imagescan_pkgrel.txt
+          if [ -f imagescan_pkgrel.txt ]; then
+            IMAGESCAN_PKGREL=$(tr -d ' \t\n\r' < imagescan_pkgrel.txt)
+          else
+            IMAGESCAN_PKGREL=0
+          fi
+          IMAGESCAN_PKGREL=$((IMAGESCAN_PKGREL + 1))
+          echo "$IMAGESCAN_PKGREL" > imagescan_pkgrel.txt
+
+          # Replace '[[PKGREL]]' in the template
+          sed -e "s/\[\[PKGREL\]\]/$IMAGESCAN_PKGREL/g" PKGBUILD-template.sh > PKGBUILD
+
+      - name: Publish imagescan to AUR
+        if: steps.compare.outputs.changed == 'true'
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.1
+        with:
+          pkgname: imagescan
+          pkgbuild: ./PKGBUILD
+          assets: |
+            assets/.nvchecker.toml
+            assets/boost-1.74.patch
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "upgpkg: boost ${{ steps.latest.outputs.latest }} rebuild"
+          ssh_keyscan_types: rsa,ecdsa,ed25519
+
+      - name: Update version file
+        if: steps.compare.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          printf "%s\n" "${{ steps.latest.outputs.latest }}" > current_version.txt
+
+          # Commit the updated current_version.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add current_version.txt
+          git add imagescan_pkgrel.txt
+          git commit -m "boost-libs: bump to ${{ steps.latest.outputs.latest }}"
+          git push
