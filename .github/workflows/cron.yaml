@@ -51,7 +51,21 @@ jobs:
           else
             jq_version_filter="$jq_version_filter_without_pkgrel"
           fi
-          LATEST=$(curl -fsSL "$API_URL" | jq -r "$jq_version_filter")
+
+          RETRIES=10
+          for i in $(seq 1 $RETRIES); do
+            if JSON=$(curl -fsSL "$API_URL"); then
+              break
+            fi
+            echo "curl failed (attempt $i/$RETRIES), retrying in 60 seconds..." >&2
+            sleep 60
+          done
+          if [ -z "${JSON:-}" ]; then
+            echo "Failed to fetch package info from API after $RETRIES attempts: $API_URL" >&2
+            exit 1
+          fi
+
+          LATEST=$(echo "$JSON" | jq -r "$jq_version_filter")
           if [ -z "${LATEST:-}" ] || [ "${LATEST}" = "null-" ]; then
             echo "Could not determine latest version from API: $API_URL" >&2
             exit 1
