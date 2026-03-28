@@ -2,7 +2,7 @@ name: Check Arch boost-libs Release
 
 on:
   schedule:
-    - cron: "0 */12 * * *"   # every 12 hours
+    - cron: "0 */6 * * *"   # every 6 hours
   workflow_dispatch: {}
 
 permissions:
@@ -11,6 +11,9 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.compare.outputs.changed }}
+      latest: ${{ steps.latest.outputs.latest }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -95,8 +98,15 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
+  publish:
+    runs-on: ubuntu-latest
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
       - name: Update imagescan pkgrel
-        if: steps.compare.outputs.changed == 'true'
         run: |
           # Read and increment imagescan_pkgrel.txt
           if [ -f imagescan_pkgrel.txt ]; then
@@ -111,7 +121,6 @@ jobs:
           sed -e "s/\[\[PKGREL\]\]/$IMAGESCAN_PKGREL/g" PKGBUILD-template.sh > PKGBUILD
 
       - name: Publish imagescan to AUR
-        if: steps.compare.outputs.changed == 'true'
         uses: KSXGitHub/github-actions-deploy-aur@v4.1.1
         with:
           pkgname: imagescan
@@ -122,21 +131,20 @@ jobs:
           commit_username: ${{ secrets.AUR_USERNAME }}
           commit_email: ${{ secrets.AUR_EMAIL }}
           ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-          commit_message: "upgpkg: boost ${{ steps.latest.outputs.latest }} rebuild"
+          commit_message: "upgpkg: boost ${{ needs.check.outputs.latest }} rebuild"
           ssh_keyscan_types: rsa,ecdsa,ed25519
 
       - name: Update version file
-        if: steps.compare.outputs.changed == 'true'
         shell: bash
         run: |
           set -euo pipefail
 
-          printf "%s\n" "${{ steps.latest.outputs.latest }}" > current_version.txt
+          printf "%s\n" "${{ needs.check.outputs.latest }}" > current_version.txt
 
           # Commit the updated current_version.txt
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add current_version.txt
           git add imagescan_pkgrel.txt
-          git commit -m "boost-libs: bump to ${{ steps.latest.outputs.latest }}"
+          git commit -m "boost-libs: bump to ${{ needs.check.outputs.latest }}"
           git push
