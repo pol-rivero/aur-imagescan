@@ -58,6 +58,7 @@ prepare() {
 
 build() {
   cd utsushi-$_utsushiver
+  export CXXFLAGS="$CXXFLAGS -std=c++17"
   ./configure \
     --prefix=/usr/ \
     --libexecdir=/usr/lib/ \
